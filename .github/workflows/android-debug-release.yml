@@ -1,74 +1,47 @@
-name: Android Debug APK to Release
+name: Android Debug APK Release
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag (contoh: v1.0.0-debug)"
+        description: "Release tag, contoh: v1.0.0-debug"
         required: true
+        default: "v1.0.0-debug"
         type: string
+
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
-  build-and-upload-debug-apk:
+  build-debug-release:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Setup JDK 8
+      - name: Setup Java 8
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "8"
           cache: gradle
 
-      - name: Setup Android SDK tools
-        uses: android-actions/setup-android@v3
+      - name: Check Java version
+        run: java -version
 
-      - name: Install required Android SDK packages
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          COMPILE_SDK=$(sed -n "s/.*compileSdkVersion[[:space:]]\+\([0-9]\+\).*/\1/p" app/build.gradle | head -n 1)
-          BUILD_TOOLS=$(sed -n "s/.*buildToolsVersion[[:space:]]*['\"]\([^'\"]\+\)['\"].*/\1/p" app/build.gradle | head -n 1)
-
-          if [ -z "$COMPILE_SDK" ]; then
-            echo "compileSdkVersion tidak ditemukan di app/build.gradle"
-            exit 1
-          fi
-
-          echo "compileSdkVersion: $COMPILE_SDK"
-          if [ -n "$BUILD_TOOLS" ]; then
-            echo "buildToolsVersion: $BUILD_TOOLS"
-          else
-            echo "buildToolsVersion tidak ditemukan, lanjut tanpa install build-tools spesifik"
-          fi
-
-          yes | sdkmanager --licenses >/dev/null
-
-          PKGS=("platforms;android-${COMPILE_SDK}")
-          if [ -n "$BUILD_TOOLS" ]; then
-            PKGS+=("build-tools;${BUILD_TOOLS}")
-          fi
-
-          sdkmanager "${PKGS[@]}"
-
-      - name: Ensure Gradle wrapper is executable
+      - name: Make Gradle executable
         run: chmod +x ./gradlew
 
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug
 
-      - name: Resolve release tag
-        id: tag
+      - name: Prepare APK
+        id: apk
         shell: bash
         run: |
           set -euo pipefail
@@ -79,63 +52,45 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
           fi
 
-          if [ -z "$TAG" ]; then
-            echo "release tag kosong"
+          APK_PATH=$(find . -path "*/build/outputs/apk/debug/*.apk" -type f | head -n 1)
+
+          if [ -z "$APK_PATH" ]; then
+            echo "Debug APK tidak ditemukan."
+            echo "Daftar APK:"
+            find . -name "*.apk" -type f
             exit 1
           fi
+
+          mkdir -p dist
+          APK_NAME="app-debug-${TAG}.apk"
+          cp "$APK_PATH" "dist/$APK_NAME"
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $TAG"
+          echo "apk_file=dist/$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "APK siap: dist/$APK_NAME"
 
-      - name: Rename APK with release tag
-        id: apk
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
-          if [ ! -f "$APK_PATH" ]; then
-            echo "APK debug tidak ditemukan: $APK_PATH"
-            exit 1
-          fi
-
-          TAG="${{ steps.tag.outputs.tag }}"
-          RENAMED_APK="app-debug-${TAG}.apk"
-          cp "$APK_PATH" "$RENAMED_APK"
-
-          echo "apk_path=$RENAMED_APK" >> "$GITHUB_OUTPUT"
-          echo "APK siap upload: $RENAMED_APK"
-
-      - name: Ensure release exists
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG="${{ steps.tag.outputs.tag }}"
-
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $TAG sudah ada"
-          else
-            gh release create "$TAG" \
-              --repo "${{ github.repository }}" \
-              --title "$TAG" \
-              --notes "Automated debug APK release for $TAG"
-          fi
-
-      - name: Upload APK asset to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release upload "${{ steps.tag.outputs.tag }}" "${{ steps.apk.outputs.apk_path }}" \
-            --repo "${{ github.repository }}" \
-            --clobber
-
-      - name: Upload debug APK artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk-${{ steps.tag.outputs.tag }}
-          path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            ${{ steps.apk.outputs.apk_path }}
-          if-no-files-found: error
+          name: ${{ steps.apk.outputs.tag }}-debug-apk
+          path: ${{ steps.apk.outputs.apk_file }}
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.apk.outputs.tag }}
+          APK_FILE: ${{ steps.apk.outputs.apk_file }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG sudah ada. Upload ulang APK..."
+            gh release upload "$TAG" "$APK_FILE" --clobber
+          else
+            echo "Membuat release $TAG..."
+            gh release create "$TAG" "$APK_FILE" \
+              --title "$TAG" \
+              --notes "Debug APK otomatis dari GitHub Actions. Commit: $GITHUB_SHA" \
+              --target "$GITHUB_SHA" \
+              --prerelease
+          fi
