@@ -1,0 +1,62 @@
+name: Android Debug APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Ensure Gradle wrapper is executable
+        run: chmod +x ./gradlew
+
+      - name: Detect Android application module
+        id: detect_module
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SETTINGS_FILE=""
+          if [ -f settings.gradle ]; then
+            SETTINGS_FILE="settings.gradle"
+          elif [ -f settings.gradle.kts ]; then
+            SETTINGS_FILE="settings.gradle.kts"
+          else
+            echo "Tidak menemukan settings.gradle atau settings.gradle.kts"
+            exit 1
+          fi
+
+          MODULE=$(sed -n "s/.*['\"]:\([^'\"]*\)['\"].*/\1/p" "$SETTINGS_FILE" | head -n 1)
+
+          if [ -z "$MODULE" ]; then
+            MODULE="app"
+          fi
+
+          echo "module=$MODULE" >> "$GITHUB_OUTPUT"
+          echo "Module terdeteksi: $MODULE"
+
+      - name: Build debug APK
+        run: ./gradlew :${{ steps.detect_module.outputs.module }}:assembleDebug
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: |
+            ${{ github.workspace }}/${{ steps.detect_module.outputs.module }}/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
